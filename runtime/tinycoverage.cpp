@@ -72,7 +72,7 @@ void init()
 }
 };  // namespace tinycoverage
 
-extern "C" void __sanitizer_cov_bool_flag_init(bool* start, bool* end)
+extern "C" void __tinycoverage_init(bool* start, bool* end)
 {
     table = start;
     bb_count = end - start;

@@ -13,14 +13,6 @@ static cl::opt<bool> Wave("wave-goodbye", cl::init(false),
 
 namespace {
 
-void runBye(Function &F) {
-    if (F.empty())
-        return;
-
-    errs() << "Bye: ";
-    errs().write_escaped(F.getName()) << '\n';
-}
-
 struct LegacyBye : public ModulePass {
     static inline char ID = 0;
 
@@ -31,20 +23,28 @@ struct LegacyBye : public ModulePass {
             return false;
         }
 
-        for (Function &F : M)
-            runBye(F);
+        errs() << "Module: " << M.getName() << "\n";
+
+        for (Function &F : M) {
+            if (F.empty())
+                continue;
+
+            errs() << "Bye: " << F.getName() << '\n';
+        }
 
         return true;
     }
 };
 } // namespace
 
-static RegisterPass<LegacyBye> X("goodbye", "Good Bye World Pass",
-                                 false /* Only looks at CFG */,
-                                 false /* Analysis Pass */);
+static RegisterPass<LegacyBye>
+    X("tinycoverage",
+      "Pass that instruments basic blocks and emits block info to files for "
+      "each translation unit",
+      false /* Only looks at CFG */, false /* Analysis Pass */);
 
-/* Legacy PM Registration */
-static llvm::RegisterStandardPasses RegisterBye(
-    llvm::PassManagerBuilder::EP_EarlyAsPossible,
-    [](const llvm::PassManagerBuilder &Builder,
-       llvm::legacy::PassManagerBase &PM) { PM.add(new LegacyBye()); });
+static RegisterStandardPasses
+    RegisterBye(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                [](const PassManagerBuilder &, legacy::PassManagerBase &PM) {
+                    PM.add(new LegacyBye());
+                });
