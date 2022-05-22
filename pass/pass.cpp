@@ -1,53 +1,14 @@
-#include "unordered_set"
+#include "pass.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <unordered_set>
 
 using namespace llvm;
-
-namespace {
-
-// todo check target triple
-// todo store in a single section (linux uses less than 64 bytes for addresses)
-
-constexpr char CountersSection[] = "__tinycoverage_counters";
-constexpr char FuncNamesSection[] = "__tinycoverage_func_names";
-constexpr char CallbackName[] = "__tinycoverage_init";
-
-class TinycoveragePass : public PassInfoMixin<TinycoveragePass> {
-    GlobalVariable *CreateSection(Module &M, Type *Ty, size_t N, StringRef SectionName, Constant *Initializer) const;
-    Constant *AddFunctionNameVar(Module &M, Function &F) const;
-
-    void InsertCallbackInvocation(Module &M) const;
-
-    void instrumentFunction(Module &M, Function &F);
-    void InjectCoverageAtBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx, GlobalVariable *Array);
-
-    Type *IntptrTy, *Int8Ty, *Int1Ty, *Int8PtrTy;
-    const DataLayout *DataLayout;
-
-    FunctionAnalysisManager *FAM;
-
-    SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
-
-  public:
-    TinycoveragePass() = default;
-    PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
-    static bool isRequired() { return true; }
-};
-}
 
 void TinycoveragePass::InsertCallbackInvocation(Module &M) const {
     constexpr auto Linkage = GlobalVariable::ExternalWeakLinkage;
@@ -78,7 +39,7 @@ void TinycoveragePass::InsertCallbackInvocation(Module &M) const {
 
     const auto [CtorFunc, _] = createSanitizerCtorAndInitFunctions(M, CtorName, CallbackName, ArgTypes, Args);
 
-    CtorFunc->setComdat(M.getOrInsertComdat(CtorName));
+    CtorFunc->setComdat(M.getOrInsertComdat(CtorName)); // mark section as duplicate
 
     constexpr uint64_t CtorPriority = 2;
     appendToGlobalCtors(M, CtorFunc, CtorPriority, CtorFunc);
@@ -204,8 +165,6 @@ void TinycoveragePass::instrumentFunction(Module &M, Function &F) {
         return;
     }
 
-    SmallVector<Constant *> FuncNamesArray;
-
     for (size_t i = 0; i < N; i++) {
         BasicBlock &BB = *BlocksToInstrument[i];
 
@@ -281,19 +240,4 @@ void TinycoveragePass::InjectCoverageAtBlock(Module &M, Function &F, BasicBlock 
 
     SetNoSanitizeMetadata(Load);
     SetNoSanitizeMetadata(Store);
-}
-
-PassPluginLibraryInfo getTinycoveragePluginInfo() {
-    const auto callback = [](PassBuilder &PB) {
-        PB.registerPipelineEarlySimplificationEPCallback([&](ModulePassManager &MPM, auto) {
-            MPM.addPass(TinycoveragePass());
-            return true;
-        });
-    };
-
-    return {LLVM_PLUGIN_API_VERSION, "tinycoverage", "0.0.1", callback};
-};
-
-extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
-    return getTinycoveragePluginInfo();
 }
