@@ -15,11 +15,8 @@ void tinycoverage_test_finished() {
 int tinycoverage_shut_down() { return 0; }
 int tinycoverage_init(const char *) { return 0; }
 
-extern "C" void __tinycoverage_counters_init(bool *start, bool *end) {
-    counters = start;
-    bb_count = end - start;
-}
-
-extern "C" void __tinycoverage_func_names_init(char **start, char **) {
-    func_names = start;
+extern "C" void __tinycoverage_init(bool *cnt_start, bool *cnt_end, char** names_start) {
+    counters = cnt_start;
+    func_names = names_start;
+    bb_count = cnt_end - cnt_start;
 }

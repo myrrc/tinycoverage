@@ -3,8 +3,10 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
@@ -15,68 +17,66 @@
 
 using namespace llvm;
 
-static cl::opt<bool> Enabled("tinycoverage", cl::desc("Instrument each BB"), cl::Hidden, cl::init(false));
-
 namespace {
+
+// todo check target triple
+// todo store in a single section (linux uses less than 64 bytes for addresses)
 
 constexpr char CountersSection[] = "__tinycoverage_counters";
 constexpr char FuncNamesSection[] = "__tinycoverage_func_names";
+constexpr char CallbackName[] = "__tinycoverage_init";
 
-class TinycoveragePass : public ModulePass {
+class TinycoveragePass : public PassInfoMixin<TinycoveragePass> {
     GlobalVariable *CreateSection(Module &M, Type *Ty, size_t N, StringRef SectionName, Constant *Initializer) const;
     Constant *AddFunctionNameVar(Module &M, Function &F) const;
+
+    void InsertCallbackInvocation(Module &M) const;
 
     void instrumentFunction(Module &M, Function &F);
     void InjectCoverageAtBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx, GlobalVariable *Array);
 
-    Type *IntptrTy, *Int8Ty, *Int1Ty;
+    Type *IntptrTy, *Int8Ty, *Int1Ty, *Int8PtrTy;
     const DataLayout *DataLayout;
+
+    FunctionAnalysisManager *FAM;
 
     SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
 
-    const DominatorTree *DTCallback(Function &F) {
-        return &this->getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
-    };
-
-    const PostDominatorTree *PDTCallback(Function &F) {
-        return &this->getAnalysis<PostDominatorTreeWrapperPass>(F).getPostDomTree();
-    };
-
   public:
-    static inline char ID = 0;
-
-    TinycoveragePass() : ModulePass(ID) {}
-
-    bool runOnModule(Module &M) final;
-
-    void getAnalysisUsage(AnalysisUsage &AU) const final {
-        AU.addRequired<DominatorTreeWrapperPass>();
-        AU.addRequired<PostDominatorTreeWrapperPass>();
-    }
+    TinycoveragePass() = default;
+    PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
+    static bool isRequired() { return true; }
 };
 }
 
-void CreateCallbackCall(Module &M, Type *ItemTy, StringRef SectionName) {
+void TinycoveragePass::InsertCallbackInvocation(Module &M) const {
     constexpr auto Linkage = GlobalVariable::ExternalWeakLinkage;
 
-    const Twine SectionStart = "__start_" + SectionName;
-    const Twine SectionStop = "__stop_" + SectionName;
+    const Twine CountersStartName(StringRef("__start_"), CountersSection);
+    const Twine CountersStopName(StringRef("__stop_"), CountersSection);
+    const Twine FuncNamesStartName(StringRef("__start_"), FuncNamesSection);
 
-    GlobalVariable *const Start = new GlobalVariable(M, ItemTy, false, Linkage, nullptr, SectionStart);
-    GlobalVariable *const End = new GlobalVariable(M, ItemTy, false, Linkage, nullptr, SectionStop);
+    GlobalVariable *const CountersStart = new GlobalVariable(
+        M, Int1Ty, false, Linkage, nullptr, CountersStartName);
 
-    Start->setVisibility(GlobalValue::HiddenVisibility);
-    End->setVisibility(GlobalValue::HiddenVisibility);
+    GlobalVariable *const CountersStop = new GlobalVariable(
+        M, Int1Ty, false, Linkage, nullptr, CountersStopName);
 
-    Type *const PtrTy = PointerType::getUnqual(ItemTy);
+    GlobalVariable *const FuncNamesStart = new GlobalVariable(
+        M, Int8PtrTy, false, Linkage, nullptr, FuncNamesStartName);
 
-    const std::string CallbackName = SectionName.str() + "_init";
-    const std::string CtorName = "tinycoverage.module_ctor_" + SectionName.str();
+    CountersStart->setVisibility(GlobalValue::HiddenVisibility);
+    CountersStop->setVisibility(GlobalValue::HiddenVisibility);
+    FuncNamesStart->setVisibility(GlobalValue::HiddenVisibility);
 
-    Function *const CtorFunc
-        = createSanitizerCtorAndInitFunctions(M, CtorName, CallbackName, {PtrTy, PtrTy}, {Start, End}).first;
+    Type *const Int1PtrTy = PointerType::getUnqual(Int1Ty);
+    Type *const Int8PtrPtrTy = PointerType::getUnqual(Int8PtrTy);
 
-    assert(CtorFunc->getName() == CtorName);
+    constexpr StringRef CtorName = "tinycoverage.module_ctor";
+    const SmallVector<Type *, 3> ArgTypes = {Int1PtrTy, Int1PtrTy, Int8PtrPtrTy};
+    const SmallVector<Value *, 3> Args = {CountersStart, CountersStop, FuncNamesStart};
+
+    const auto [CtorFunc, _] = createSanitizerCtorAndInitFunctions(M, CtorName, CallbackName, ArgTypes, Args);
 
     CtorFunc->setComdat(M.getOrInsertComdat(CtorName));
 
@@ -84,10 +84,8 @@ void CreateCallbackCall(Module &M, Type *ItemTy, StringRef SectionName) {
     appendToGlobalCtors(M, CtorFunc, CtorPriority, CtorFunc);
 }
 
-bool TinycoveragePass::runOnModule(Module &M) {
-    if (!Enabled) {
-        return false;
-    }
+PreservedAnalyses TinycoveragePass::run(Module &M, ModuleAnalysisManager &MAM) {
+    FAM = &MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
     DataLayout = &M.getDataLayout();
 
@@ -96,44 +94,44 @@ bool TinycoveragePass::runOnModule(Module &M) {
     IntptrTy = builder.getIntNTy(DataLayout->getPointerSizeInBits());
     Int8Ty = builder.getInt8Ty();
     Int1Ty = builder.getInt1Ty();
+    Int8PtrTy = PointerType::getUnqual(Int8Ty);
 
     GlobalsToAppendToCompilerUsed.clear();
 
     for (Function &F : M)
         instrumentFunction(M, F);
 
-    CreateCallbackCall(M, Int1Ty, CountersSection);
-    CreateCallbackCall(M, PointerType::getUnqual(Int8Ty), FuncNamesSection);
+    InsertCallbackInvocation(M);
 
     appendToCompilerUsed(M, GlobalsToAppendToCompilerUsed);
 
-    return true;
+    return PreservedAnalyses::none();
 }
 
-static bool isFullDominator(const BasicBlock *BB, const DominatorTree *DT) {
-    if (succ_empty(BB))
+bool shouldInstrumentBlock(const Function &F, const BasicBlock &BB, const DominatorTree &DT,
+                           const PostDominatorTree &PDT) {
+    if (isa<UnreachableInst>(BB.getFirstNonPHIOrDbgOrLifetime())
+        || BB.getFirstInsertionPt() == BB.end())
         return false;
 
-    return all_of(successors(BB), [&](const BasicBlock *SUCC) { return DT->dominates(BB, SUCC); });
-}
-
-static bool isFullPostDominator(const BasicBlock *BB, const PostDominatorTree *PDT) {
-    if (pred_empty(BB))
-        return false;
-
-    return all_of(predecessors(BB), [&](const BasicBlock *PRED) { return PDT->dominates(BB, PRED); });
-}
-
-static bool shouldInstrumentBlock(const Function &F, const BasicBlock *BB, const DominatorTree *DT,
-                                  const PostDominatorTree *PDT) {
-    if (isa<UnreachableInst>(BB->getFirstNonPHIOrDbgOrLifetime())
-        || BB->getFirstInsertionPt() == BB->end())
-        return false;
-
-    if (&F.getEntryBlock() == BB)
+    if (&F.getEntryBlock() == &BB)
         return true;
 
-    return !isFullDominator(BB, DT) && !(isFullPostDominator(BB, PDT) && !BB->getSinglePredecessor());
+    const auto isFullDominator = [&] {
+        if (succ_empty(&BB))
+            return false;
+
+        return all_of(successors(&BB), [&](const BasicBlock *SUCC) { return DT.dominates(&BB, SUCC); });
+    };
+
+    const auto isFullPostDominator = [&] {
+        if (pred_empty(&BB))
+            return false;
+
+        return all_of(predecessors(&BB), [&](const BasicBlock *PRED) { return PDT.dominates(&BB, PRED); });
+    };
+
+    return !isFullDominator() && !(isFullPostDominator() && !BB.getSinglePredecessor());
 }
 
 GlobalVariable *TinycoveragePass::CreateSection(
@@ -179,11 +177,11 @@ void TinycoveragePass::instrumentFunction(Module &M, Function &F) {
 
     SmallVector<BasicBlock *, 16> BlocksToInstrument;
 
-    const DominatorTree *const DT = DTCallback(F);
-    const PostDominatorTree *const PDT = PDTCallback(F);
+    const DominatorTree &DT = FAM->getResult<DominatorTreeAnalysis>(F);
+    const PostDominatorTree &PDT = FAM->getResult<PostDominatorTreeAnalysis>(F);
 
     for (BasicBlock &BB : F)
-        if (shouldInstrumentBlock(F, &BB, DT, PDT))
+        if (shouldInstrumentBlock(F, BB, DT, PDT))
             BlocksToInstrument.push_back(&BB);
 
     if (BlocksToInstrument.empty())
@@ -220,7 +218,7 @@ void TinycoveragePass::instrumentFunction(Module &M, Function &F) {
 
         std::unordered_set<unsigned int> lineset;
 
-        for (const Instruction &I : *BlocksToInstrument[i])
+        for (const Instruction &I : BB)
             if (const DebugLoc &loc = I.getDebugLoc(); loc && loc.getLine() > 0)
                 lineset.insert(loc.getLine());
 
@@ -269,13 +267,13 @@ void TinycoveragePass::InjectCoverageAtBlock(Module &M, Function &F, BasicBlock 
     if (EntryLoc)
         IRB.SetCurrentDebugLocation(EntryLoc);
 
-    auto FlagPtr
-        = IRB.CreateGEP(Array->getValueType(), Array, {ConstantInt::get(IntptrTy, 0), ConstantInt::get(IntptrTy, Idx)});
-    auto Load = IRB.CreateLoad(Int1Ty, FlagPtr);
-    auto ThenTerm = SplitBlockAndInsertIfThen(IRB.CreateIsNull(Load), &*IP, false);
+    const SmallVector<Value *, 2> Idxs = {ConstantInt::get(IntptrTy, 0), ConstantInt::get(IntptrTy, Idx)};
+    Value *const FlagPtr = IRB.CreateGEP(Array->getValueType(), Array, Idxs);
+    LoadInst *const Load = IRB.CreateLoad(Int1Ty, FlagPtr);
+    Instruction *const ThenTerm = SplitBlockAndInsertIfThen(IRB.CreateIsNull(Load), &*IP, false);
 
     IRBuilder<> ThenIRB(ThenTerm);
-    auto Store = ThenIRB.CreateStore(ConstantInt::getTrue(Int1Ty), FlagPtr);
+    StoreInst *const Store = ThenIRB.CreateStore(ConstantInt::getTrue(Int1Ty), FlagPtr);
 
     auto SetNoSanitizeMetadata = [&M](Instruction *I) {
         I->setMetadata(I->getModule()->getMDKindID("nosanitize"), MDNode::get(M.getContext(), None));
@@ -285,9 +283,17 @@ void TinycoveragePass::InjectCoverageAtBlock(Module &M, Function &F, BasicBlock 
     SetNoSanitizeMetadata(Store);
 }
 
-static RegisterPass<TinycoveragePass> RegisterPass("tinycoverage", "Tinycoverage", false, false);
+PassPluginLibraryInfo getTinycoveragePluginInfo() {
+    const auto callback = [](PassBuilder &PB) {
+        PB.registerPipelineEarlySimplificationEPCallback([&](ModulePassManager &MPM, auto) {
+            MPM.addPass(TinycoveragePass());
+            return true;
+        });
+    };
 
-static RegisterStandardPasses RegisterBye(PassManagerBuilder::EP_EnabledOnOptLevel0,
-                                          [](const PassManagerBuilder &, legacy::PassManagerBase &PM) {
-                                              PM.add(new TinycoveragePass());
-                                          });
+    return {LLVM_PLUGIN_API_VERSION, "tinycoverage", "0.0.1", callback};
+};
+
+extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return getTinycoveragePluginInfo();
+}
