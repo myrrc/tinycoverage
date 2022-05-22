@@ -1,4 +1,5 @@
 #include "tinycoverage.h"
+#include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <unistd.h>
@@ -76,9 +77,6 @@ extern "C" void __tinycoverage_init(bool* start, bool* end)
 {
     table = start;
     bb_count = end - start;
-
-    for (; start != end; ++start)
-        *start = false;
 
     tinycoverage::init();
 }

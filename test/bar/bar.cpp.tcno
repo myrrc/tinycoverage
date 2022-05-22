@@ -1,0 +1,17 @@
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
+test/bar/bar.cpp _Z3barv 0 6 5 
+test/bar/../foo.h _Z3foov 1 5 4 
