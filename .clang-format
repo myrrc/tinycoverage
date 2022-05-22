@@ -3,3 +3,7 @@ IndentWidth: 4
 UseTab: Never
 AllowAllArgumentsOnNextLine: true
 FixNamespaceComments: false
+ColumnLimit: 0
+BreakBeforeBinaryOperators: All
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false

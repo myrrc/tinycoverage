@@ -1,46 +1,34 @@
 #include "tinycoverage.h"
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
-#include <unistd.h>
-#include <sys/mman.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
-constexpr const char report_path[] = "/home/myrrc/tinycoverage/report";
-constexpr size_t report_file_size_upper_limit = 200 * 1024 * 1024;
+constexpr size_t report_file_size_upper_limit = 200 * 1024;
 
 constexpr uint32_t MagicTestEntry = 0xfefefefe;
 
-bool* table;
 size_t bb_count;
+bool *counters;
+char **func_names;
+
 int report_file_fd;
-uint32_t* report_file_ptr;
+uint32_t *report_file_ptr;
 size_t report_file_pos{0};
 
-void (*init_abort_callback)() = abort;
-
-constexpr bool exchange(bool& obj, bool target)
-{
-    bool out = obj;
-    obj = target;
-    return out;
-}
-
-namespace tinycoverage
-{
-void test_finished()
-{
+void tinycoverage_test_finished() {
     report_file_ptr[report_file_pos++] = MagicTestEntry;
 
-    const size_t count = bb_count;
-
-    for (size_t bb_index = 0; bb_index < count; ++bb_index)
-        if (exchange(table[bb_index], false))
+    for (size_t bb_index = 0; bb_index < bb_count; ++bb_index)
+        if (counters[bb_index]) {
             report_file_ptr[report_file_pos++] = bb_index;
+            counters[bb_index] = false;
+        }
 }
 
-int shut_down()
-{
+int tinycoverage_shut_down() {
     if (msync(report_file_ptr, report_file_size_upper_limit, MS_SYNC) == -1)
         return -1;
     if (munmap(report_file_ptr, report_file_size_upper_limit) == -1)
@@ -56,27 +44,29 @@ int shut_down()
     return 0;
 }
 
-void init()
-{
-    report_file_fd = open(report_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+int tinycoverage_init(const char *report_file_name) {
+    report_file_fd = open(report_file_name, O_RDWR | O_CREAT | O_TRUNC, 0666);
+
     if (report_file_fd == -1)
-        init_abort_callback();
+        return -1;
 
     if (ftruncate(report_file_fd, report_file_size_upper_limit) == -1)
-        init_abort_callback();
+        return -1;
 
-    void* const ptr = mmap(nullptr, report_file_size_upper_limit, PROT_WRITE, MAP_SHARED, report_file_fd, 0);
+    void *const ptr = mmap(nullptr, report_file_size_upper_limit, PROT_WRITE,
+                           MAP_SHARED, report_file_fd, 0);
     if (ptr == MAP_FAILED)
-        init_abort_callback();
+        return -1;
 
-    report_file_ptr = static_cast<uint32_t*>(ptr);
+    report_file_ptr = static_cast<uint32_t *>(ptr);
+    return 0;
 }
-};  // namespace tinycoverage
 
-extern "C" void __tinycoverage_init(bool* start, bool* end)
-{
-    table = start;
+extern "C" void __tinycoverage_counters_init(bool *start, bool *end) {
+    counters = start;
     bb_count = end - start;
+}
 
-    tinycoverage::init();
+extern "C" void __tinycoverage_func_names_init(char **start, char **) {
+    func_names = start;
 }

@@ -2,5 +2,5 @@
 #include <cstdio>
 
 inline void foo() {
-    printf("foo");
+    printf("Inside foo\n");
 }

@@ -3,6 +3,6 @@
 #include <cstdio>
 
 void bar() {
-    printf("bar");
+    printf("Inside bar, calling foo\n");
 	foo();
 }

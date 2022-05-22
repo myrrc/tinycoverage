@@ -1,10 +1,7 @@
 #pragma once
-extern "C" void __tinycoverage_init(bool * start, bool * end);
+extern "C" void __tinycoverage_counters_init(bool *start, bool *end);
+extern "C" void __tinycoverage_func_names_init(char **start, char **end);
 
-namespace tinycoverage {
-void test_finished();
-int shut_down();
-};
-
-//extern "C" void __tinycoverage_test_finished();
-//extern "C" void __tinycoverage_shut_down();
+int tinycoverage_init(const char *report_file_name);
+int tinycoverage_shut_down();
+void tinycoverage_test_finished();
