@@ -1,7 +1,6 @@
 from struct import unpack
 import os.path
 from io import BytesIO
-from dataclasses import dataclass
 
 ENTRY = 0xfefefeaa
 INDICES = 0xfefefeab
@@ -18,6 +17,16 @@ class BinaryParser:
             raise Exception()
 
         return unpack("<I" if self.is_le else ">I", data)[0]
+
+    def test_endian(self, f):
+        data = f.read(4)
+
+        if unpack(">I", data)[0] == ENTRY:
+            self.is_le = False
+        elif unpack("<I", data)[0] == ENTRY:
+            self.is_le = True
+        else:
+            raise Exception()
 
     def read_str(self, f):
         return f.read(self.read_uint32(f) * 4).rstrip(b"\0").decode("utf-8")
@@ -38,14 +47,7 @@ class ReportParser(BinaryParser):
         return self.tests, self.bb_to_func_idx, self.func_idx_to_name
 
     def read_tests(self, f):
-        data = f.read(4)
-
-        if unpack(">I", data)[0] == ENTRY:
-            self.is_le = False
-        elif unpack("<I", data)[0] == ENTRY:
-            self.is_le = True
-        else:
-            raise Exception()
+        self.test_endian(f)
 
         tests = []
 
@@ -67,7 +69,7 @@ class ReportParser(BinaryParser):
 
     def read_indices(self, f):
         i = 0
-        
+
         while True:
             token = self.read_uint32(f)
 

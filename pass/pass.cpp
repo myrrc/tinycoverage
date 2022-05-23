@@ -1,4 +1,5 @@
 #include "pass.h"
+#include "../common/magic.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -26,7 +27,7 @@ constexpr StringRef CtorName = "tinycoverage.module_ctor";
 // TODO support GCOV regex to include/exclude source files
 // TODO think about blocks deduplication
 
-void TinycoveragePass::InsertCallbackInvocation(Module &M) const {
+void TinycoveragePass::insertCallbackInvocation(Module &M) const {
     Type *const Int1PtrTy = PointerType::getUnqual(Int1Ty);
     Type *const Int8PtrTy = PointerType::getUnqual(Int8Ty);
     Type *const Int8PtrPtrTy = PointerType::getUnqual(Int8PtrTy);
@@ -50,7 +51,8 @@ void TinycoveragePass::InsertCallbackInvocation(Module &M) const {
     const SmallVector<Type *, 3> ArgTypes = {Int1PtrTy, Int1PtrTy, Int8PtrPtrTy};
     const SmallVector<Value *, 3> Args = {CountersStart, CountersStop, FuncNamesStart};
 
-    const auto [CtorFunc, _] = createSanitizerCtorAndInitFunctions(M, CtorName, CallbackName, ArgTypes, Args);
+    const auto [CtorFunc, _] = createSanitizerCtorAndInitFunctions(
+        M, CtorName, CallbackName, ArgTypes, Args);
     CtorFunc->setComdat(M.getOrInsertComdat(CtorName));
 
     constexpr uint64_t CtorPriority = 2;
@@ -62,7 +64,6 @@ PreservedAnalyses TinycoveragePass::run(Module &M, ModuleAnalysisManager &MAM) {
     DataLayout = &M.getDataLayout();
 
     IRBuilder<> builder(M.getContext());
-
     IntptrTy = builder.getIntNTy(DataLayout->getPointerSizeInBits());
     Int8Ty = builder.getInt8Ty();
     Int1Ty = builder.getInt1Ty();
@@ -70,11 +71,65 @@ PreservedAnalyses TinycoveragePass::run(Module &M, ModuleAnalysisManager &MAM) {
     for (Function &F : M)
         instrumentFunction(M, F);
 
-    InsertCallbackInvocation(M);
-
+    insertCallbackInvocation(M);
     appendToCompilerUsed(M, Globals);
 
+    emitModuleInfo(M);
+
     return PreservedAnalyses::none();
+}
+
+void TinycoveragePass::emitModuleInfo(const Module &M) const {
+    const SmallString<100> NotesFile = {M.getSourceFileName(), ".tcno"};
+    std::error_code EC;
+
+    // fix this (each .cpp file maps to multiple module files),
+    // so multiple files are output in each module
+    raw_fd_ostream Out(NotesFile, EC, sys::fs::OF_Append);
+
+    if (EC) {
+        M.getContext().emitError("failed to open coverage notes file for writing");
+        return;
+    }
+
+    auto writeHex = [&](uint32_t t) {
+        char buf[4];
+        buf[0] = t;
+        buf[1] = t >> 8;
+        buf[2] = t >> 16;
+        buf[3] = t >> 24;
+        Out.write(buf, 4);
+    };
+
+    auto writeStr = [&](StringRef str) {
+        writeHex((str.size() / 4) + 1);
+        Out.write(str.data(), str.size());
+        Out.write_zeros(4 - str.size() % 4);
+    };
+
+    writeHex(MagicEntry);
+    writeHex(ModuleInfo.size());
+
+    for (auto ModuleIt = ModuleInfo.begin(); ModuleIt != ModuleInfo.end(); ++ModuleIt) {
+        const auto &FuncInfo = ModuleIt->getValue();
+
+        writeStr(ModuleIt->getKey());
+        writeHex(FuncInfo.size());
+
+        for (auto FuncIt = FuncInfo.begin(); FuncIt != FuncInfo.end(); ++FuncIt) {
+            const auto &Blocks = FuncIt->getValue();
+
+            writeStr(FuncIt->getKey());
+            writeHex(Blocks.size());
+
+            for (const BBInfo &lineset : Blocks) {
+                writeHex(lineset.size());
+
+                for (int line : lineset)
+                    writeHex(line);
+            }
+        }
+    }
 }
 
 bool shouldInstrumentBlock(const Function &F, const BasicBlock &BB, const DominatorTree &DT,
@@ -103,7 +158,7 @@ bool shouldInstrumentBlock(const Function &F, const BasicBlock &BB, const Domina
     return !isFullDominator() && !(isFullPostDominator() && !BB.getSinglePredecessor());
 }
 
-GlobalVariable *TinycoveragePass::CreateSection(
+GlobalVariable *TinycoveragePass::createSection(
     Module &M, Type *Ty, size_t N, StringRef SectionName,
     Constant *Initializer) const {
 
@@ -117,7 +172,7 @@ GlobalVariable *TinycoveragePass::CreateSection(
     return Array;
 }
 
-Constant *TinycoveragePass::AddFunctionNameVar(Module &M, Function &F) const {
+Constant *TinycoveragePass::addFunctionNameVar(Module &M, Function &F) const {
     const StringRef Name = F.getName();
 
     SmallVector<Constant *> NameVector(Name.size() + 1);
@@ -127,12 +182,12 @@ Constant *TinycoveragePass::AddFunctionNameVar(Module &M, Function &F) const {
 
     NameVector[Name.size()] = ConstantInt::get(Int8Ty, 0);
 
-    ArrayType *StringTy = ArrayType::get(Int8Ty, NameVector.size());
+    ArrayType *const StringTy = ArrayType::get(Int8Ty, NameVector.size());
 
     // Multiple basic blocks may point to same function names.
     // In order to merge them in the resulting binary, we need LinkOnceAny.
     // Unused can be discarded.
-    GlobalVariable *Variable = new GlobalVariable(
+    GlobalVariable *const Variable = new GlobalVariable(
         M, StringTy, true, GlobalValue::LinkOnceAnyLinkage,
         ConstantArray::get(StringTy, NameVector),
         Name);
@@ -140,19 +195,14 @@ Constant *TinycoveragePass::AddFunctionNameVar(Module &M, Function &F) const {
     return ConstantExpr::getBitCast(Variable, PointerType::getUnqual(Int8Ty));
 }
 
-void EmitNotes(const Function &F, const BasicBlock &BB, size_t Idx, raw_fd_ostream &out) {
-    out << F.getSubprogram()->getFilename() << " " << F.getName() << " " << Idx << " ";
-
+void TinycoveragePass::collectBBInfo(const Function &F, const BasicBlock &BB, BBInfo &BBI) {
     std::unordered_set<unsigned int> lineset = {F.getSubprogram()->getLine()};
 
     for (const Instruction &I : BB)
         if (const DebugLoc &loc = I.getDebugLoc(); loc && loc.getLine() > 0)
             lineset.insert(loc.getLine());
 
-    for (auto line : lineset)
-        out << line << " ";
-
-    out << "\n";
+    BBI.append(lineset.begin(), lineset.end());
 }
 
 void TinycoveragePass::instrumentFunction(Module &M, Function &F) {
@@ -178,33 +228,26 @@ void TinycoveragePass::instrumentFunction(Module &M, Function &F) {
 
     const size_t N = BlocksToInstrument.size();
 
-    GlobalVariable *const Counters = CreateSection(
+    GlobalVariable *const Counters = createSection(
         M, Int1Ty, N, CountersSection, Constant::getNullValue(Int1Ty));
     Globals.push_back(Counters);
 
-    const std::string NotesFile = std::string(M.getSourceFileName()) + ".tcno";
-    std::error_code EC;
+    const StringRef SourceFileName = F.getSubprogram()->getFilename();
+    FuncInfo &FuncInfo = ModuleInfo[SourceFileName][F.getName()];
 
-    // fix this (each .cpp file maps to multiple module files),
-    // so multiple files are output in each module
-    raw_fd_ostream out(NotesFile, EC, sys::fs::OF_Append);
-
-    if (EC) {
-        M.getContext().emitError(Twine("failed to open coverage notes file for writing: ") + EC.message());
-        return;
-    }
+    FuncInfo.resize(N);
 
     for (size_t i = 0; i < N; i++) {
         BasicBlock &BB = *BlocksToInstrument[i];
-        InstrumentBlock(M, F, BB, i, Counters);
-        EmitNotes(F, BB, i, out);
+        instrumentBlock(M, F, BB, i, Counters);
+        collectBBInfo(F, BB, FuncInfo[i]);
     }
 
     // Here we could get address of function's name in DWARF's .debug_str, but it's too hard for me.
-    Constant *const FuncPtr = AddFunctionNameVar(M, F);
+    Constant *const FuncPtr = addFunctionNameVar(M, F);
     Type *const FuncNameTy = PointerType::getUnqual(Int8Ty);
 
-    GlobalVariable *const FuncNames = CreateSection(
+    GlobalVariable *const FuncNames = createSection(
         M, FuncNameTy, N, FuncNamesSection, FuncPtr);
 
     Globals.push_back(FuncNames);
@@ -219,7 +262,7 @@ struct InstrumentationIRBuilder : IRBuilder<> {
     }
 };
 
-void TinycoveragePass::InstrumentBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx,
+void TinycoveragePass::instrumentBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx,
                                        GlobalVariable *Array) {
     BasicBlock::iterator IP = BB.getFirstInsertionPt();
     const bool IsEntryBB = &BB == &F.getEntryBlock();

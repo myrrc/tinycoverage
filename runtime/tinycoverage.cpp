@@ -1,4 +1,5 @@
 #include "tinycoverage.h"
+#include "../common/magic.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -10,10 +11,6 @@
 #include <unordered_map>
 
 constexpr size_t report_file_size_upper_limit = 200 * 1024;
-
-constexpr uint32_t MagicTestEntry = 0xfefefeaa;
-constexpr uint32_t MagicNamesIndicesStart = 0xfefefeab;
-constexpr uint32_t MagicNamesStart = 0xfefefeac;
 
 size_t bb_count;
 bool *counters;
@@ -38,7 +35,7 @@ void write(std::string_view s) {
 }
 
 void tinycoverage_test_finished() {
-    write(MagicTestEntry);
+    write(MagicEntry);
 
     for (size_t bb_index = 0; bb_index < bb_count; ++bb_index)
         if (counters[bb_index]) {

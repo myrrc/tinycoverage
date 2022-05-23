@@ -9,17 +9,25 @@ class TinycoveragePass : public PassInfoMixin<TinycoveragePass> {
     static constexpr bool isRequired() { return true; }
 
   private:
-    GlobalVariable *CreateSection(Module &M, Type *Ty, size_t N, StringRef SectionName, Constant *Initializer) const;
-    Constant *AddFunctionNameVar(Module &M, Function &F) const;
-
-    void InsertCallbackInvocation(Module &M) const;
-
-    void instrumentFunction(Module &M, Function &F);
-    void InstrumentBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx, GlobalVariable *Array);
-
     Type *IntptrTy, *Int8Ty, *Int1Ty;
     const DataLayout *DataLayout;
     FunctionAnalysisManager *FAM;
     SmallVector<GlobalValue *> Globals;
+
+    using BBInfo = SmallVector<int>; // lineset
+    using FuncInfo = SmallVector<BBInfo>;
+
+    // [source file name -> [function name -> function info]]
+    StringMap<StringMap<FuncInfo>> ModuleInfo;
+
+    GlobalVariable *createSection(Module &M, Type *Ty, size_t N, StringRef SectionName, Constant *Init) const;
+    Constant *addFunctionNameVar(Module &M, Function &F) const;
+
+    void insertCallbackInvocation(Module &M) const;
+
+    void instrumentFunction(Module &M, Function &F);
+    void instrumentBlock(Module &M, Function &F, BasicBlock &BB, size_t Idx, GlobalVariable *Array);
+    void collectBBInfo(const Function &F, const BasicBlock &BB, BBInfo &BBI);
+    void emitModuleInfo(const Module&M) const;
 };
 }

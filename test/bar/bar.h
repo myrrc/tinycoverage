@@ -1,3 +1,3 @@
 #pragma once
 
-void bar();
+void normal_func_in_src();
